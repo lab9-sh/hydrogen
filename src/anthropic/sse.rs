@@ -49,6 +49,9 @@ enum BlockState {
     Text(String),
     Thinking { thinking: String, signature: String },
     ToolUse { id: String, name: String, json: String },
+    /// Hosted server tools (e.g. web_search): accumulate `input_json_delta`
+    /// like client tool_use, but finish as opaque wire (no ToolUse* events).
+    ServerToolUse { id: String, name: String, json: String },
     Raw(Value),
 }
 
@@ -118,6 +121,28 @@ impl Assembler {
                 };
                 (BlockState::ToolUse { id, name, json: String::new() }, vec![ev])
             }
+            // Official streaming sends empty input at start and fragments via
+            // input_json_delta — same as tool_use. Must reassemble for multi-turn.
+            "server_tool_use" => {
+                let id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                (
+                    BlockState::ServerToolUse {
+                        id,
+                        name,
+                        json: String::new(),
+                    },
+                    vec![],
+                )
+            }
             _ => (BlockState::Raw(block), vec![]),
         };
         // Indices are sparse if earlier blocks were skipped; pad so deltas land
@@ -155,6 +180,11 @@ impl Assembler {
                     json_fragment: partial_json,
                 }]
             }
+            // Server tool input is not a client tool call — accumulate silently.
+            (BlockState::ServerToolUse { json, .. }, D::InputJsonDelta { partial_json }) => {
+                json.push_str(&partial_json);
+                vec![]
+            }
             _ => vec![],
         }
     }
@@ -174,6 +204,19 @@ impl Assembler {
                         serde_json::from_str(&input)?
                     };
                     json!({ "type": "tool_use", "id": id, "name": name, "input": input })
+                }
+                BlockState::ServerToolUse { id, name, json: input } => {
+                    let input: Value = if input.is_empty() {
+                        json!({})
+                    } else {
+                        serde_json::from_str(&input)?
+                    };
+                    json!({
+                        "type": "server_tool_use",
+                        "id": id,
+                        "name": name,
+                        "input": input,
+                    })
                 }
                 BlockState::Raw(Value::Null) => continue,
                 BlockState::Raw(v) => v,
@@ -393,5 +436,175 @@ mod tests {
             }
             other => panic!("expected Http, got {other:?}"),
         }
+    }
+
+    /// Anthropic streams server_tool_use input via input_json_delta (same as
+    /// client tool_use). Dropping those fragments leaves multi-turn history
+    /// without the search query; web_search_tool_result encrypted_content must
+    /// also survive Event::Done for the next request.
+    #[test]
+    fn stream_assembles_web_search_server_artifacts_for_multi_turn() {
+        use crate::types::{Conversation, RequestOptions};
+        use crate::anthropic::adapter::{block_to_wire, build_request};
+
+        let mut asm = Assembler::new();
+        // Mirrors the official streaming sequence: text → server_tool_use
+        // (fragmented input) → web_search_tool_result → final text.
+        let events = feed(
+            &mut asm,
+            vec![
+                wire::StreamEvent::MessageStart {
+                    message: wire::StreamMessageStart {
+                        usage: wire::WireUsage {
+                            input_tokens: 100,
+                            output_tokens: 0,
+                        },
+                    },
+                },
+                wire::StreamEvent::ContentBlockStart {
+                    index: 0,
+                    content_block: json!({ "type": "text", "text": "" }),
+                },
+                wire::StreamEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: wire::Delta::TextDelta {
+                        text: "I'll search for that.".into(),
+                    },
+                },
+                wire::StreamEvent::ContentBlockStop { index: 0 },
+                wire::StreamEvent::ContentBlockStart {
+                    index: 1,
+                    content_block: json!({
+                        "type": "server_tool_use",
+                        "id": "srvtoolu_xyz789",
+                        "name": "web_search",
+                    }),
+                },
+                wire::StreamEvent::ContentBlockDelta {
+                    index: 1,
+                    delta: wire::Delta::InputJsonDelta {
+                        partial_json: r#"{"query":"latest quantum"#.into(),
+                    },
+                },
+                wire::StreamEvent::ContentBlockDelta {
+                    index: 1,
+                    delta: wire::Delta::InputJsonDelta {
+                        partial_json: r#" computing breakthroughs 2025"}"#.into(),
+                    },
+                },
+                wire::StreamEvent::ContentBlockStop { index: 1 },
+                wire::StreamEvent::ContentBlockStart {
+                    index: 2,
+                    content_block: json!({
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srvtoolu_xyz789",
+                        "content": [{
+                            "type": "web_search_result",
+                            "title": "Quantum Computing Breakthroughs in 2025",
+                            "url": "https://example.com",
+                            "encrypted_content": "EqgfCioIARgBIiQ3YTAwMjY1Mi1mZjM5",
+                            "page_age": "April 30, 2025"
+                        }],
+                    }),
+                },
+                wire::StreamEvent::ContentBlockStop { index: 2 },
+                wire::StreamEvent::ContentBlockStart {
+                    index: 3,
+                    content_block: json!({ "type": "text", "text": "" }),
+                },
+                wire::StreamEvent::ContentBlockDelta {
+                    index: 3,
+                    delta: wire::Delta::TextDelta {
+                        text: "Based on search results...".into(),
+                    },
+                },
+                wire::StreamEvent::ContentBlockStop { index: 3 },
+                wire::StreamEvent::MessageDelta {
+                    delta: wire::MessageDeltaBody {
+                        stop_reason: Some("end_turn".into()),
+                    },
+                    usage: Some(wire::WireUsage {
+                        input_tokens: 0,
+                        output_tokens: 40,
+                    }),
+                },
+                wire::StreamEvent::MessageStop,
+            ],
+        );
+
+        // Hosted search must not surface as client ToolUse* stream events.
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                Event::ToolUseStart { .. } | Event::ToolInputDelta { .. }
+            )),
+            "server_tool_use must not emit client tool events"
+        );
+
+        let Event::Done(resp) = events.last().unwrap() else {
+            panic!("expected Done");
+        };
+        assert_eq!(resp.provider, ProviderKind::Anthropic);
+        assert_eq!(resp.message.content.len(), 4);
+
+        // server_tool_use: full input from accumulated deltas, opaque Reasoning.
+        let server_use = match &resp.message.content[1] {
+            ContentBlock::Reasoning(r) => {
+                assert_eq!(r.payload.0["type"], "server_tool_use");
+                assert_eq!(r.payload.0["id"], "srvtoolu_xyz789");
+                assert_eq!(r.payload.0["name"], "web_search");
+                assert_eq!(
+                    r.payload.0["input"],
+                    json!({"query": "latest quantum computing breakthroughs 2025"})
+                );
+                r.payload.0.clone()
+            }
+            other => panic!("expected opaque server_tool_use, got {other:?}"),
+        };
+
+        // web_search_tool_result: encrypted_content intact.
+        let search_result = match &resp.message.content[2] {
+            ContentBlock::Reasoning(r) => {
+                assert_eq!(r.payload.0["type"], "web_search_tool_result");
+                assert_eq!(
+                    r.payload.0["content"][0]["encrypted_content"],
+                    "EqgfCioIARgBIiQ3YTAwMjY1Mi1mZjM5"
+                );
+                r.payload.0.clone()
+            }
+            other => panic!("expected opaque web_search_tool_result, got {other:?}"),
+        };
+
+        // Wire echo is byte-faithful for both blocks.
+        assert_eq!(block_to_wire(&resp.message.content[1]), server_use);
+        assert_eq!(block_to_wire(&resp.message.content[2]), search_result);
+
+        // Full stream → conversation → next request path used in production.
+        let mut conv = Conversation::new();
+        conv.push_user("What are the latest quantum computing breakthroughs?");
+        conv.push_response(resp.clone());
+        conv.push_user("go deeper");
+
+        let body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-sonnet-4-20250514".into(),
+                web_search: true,
+                ..Default::default()
+            },
+            true,
+        );
+
+        assert_eq!(body.messages[1].role, "assistant");
+        assert_eq!(body.messages[1].content[1], server_use);
+        assert_eq!(body.messages[1].content[2], search_result);
+        assert_eq!(
+            body.messages[1].content[1]["input"]["query"],
+            "latest quantum computing breakthroughs 2025"
+        );
+        assert_eq!(
+            body.messages[1].content[2]["content"][0]["encrypted_content"],
+            "EqgfCioIARgBIiQ3YTAwMjY1Mi1mZjM5"
+        );
     }
 }

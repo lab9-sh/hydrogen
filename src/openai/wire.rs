@@ -39,13 +39,38 @@ pub enum Effort {
     High,
 }
 
+/// Function tools and hosted tools (e.g. `web_search`) share the `tools` array.
 #[derive(Debug, Serialize)]
-pub struct WireTool {
-    #[serde(rename = "type")]
-    pub kind: &'static str,
-    pub name: String,
-    pub description: String,
-    pub parameters: Value,
+#[serde(untagged)]
+pub enum WireTool {
+    Function {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        name: String,
+        description: String,
+        parameters: Value,
+    },
+    WebSearch {
+        #[serde(rename = "type")]
+        kind: &'static str,
+    },
+}
+
+impl WireTool {
+    pub fn function(name: String, description: String, parameters: Value) -> Self {
+        Self::Function {
+            kind: "function",
+            name,
+            description,
+            parameters,
+        }
+    }
+
+    pub fn web_search() -> Self {
+        Self::WebSearch {
+            kind: "web_search",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

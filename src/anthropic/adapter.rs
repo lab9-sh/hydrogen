@@ -88,20 +88,27 @@ pub(super) fn build_request(
     let effort = opts.thinking.unwrap_or(ThinkingEffort::Medium);
     let (thinking, output_config) = translate_thinking(&opts.model, effort);
 
+    let mut tools: Vec<wire::WireTool> = opts
+        .tools
+        .iter()
+        .map(|t| {
+            wire::WireTool::function(
+                t.name.clone(),
+                t.description.clone(),
+                t.input_schema.clone(),
+            )
+        })
+        .collect();
+    if opts.web_search {
+        tools.push(wire::WireTool::web_search());
+    }
+
     wire::MessagesRequest {
         model: opts.model.clone(),
         max_tokens: opts.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         messages: conv.messages().iter().map(message_to_wire).collect(),
         system: opts.system.clone(),
-        tools: opts
-            .tools
-            .iter()
-            .map(|t| wire::WireTool {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: t.input_schema.clone(),
-            })
-            .collect(),
+        tools,
         temperature: opts.temperature,
         thinking: Some(thinking),
         output_config,
@@ -453,5 +460,141 @@ mod tests {
             Error::InvalidRequest(m) => assert_eq!(m, "bad schema"),
             other => panic!("expected InvalidRequest, got {other:?}"),
         }
+    }
+
+    /// Hosted web search must serialize as Anthropic's server tool, not a
+    /// client function tool, and sit alongside any caller ToolDefs.
+    #[test]
+    fn web_search_emits_hosted_tool_alongside_function_tools() {
+        let conv = Conversation::new();
+        let lookup = ToolDef {
+            name: "lookup".into(),
+            description: "d".into(),
+            input_schema: json!({"type": "object"}),
+        };
+
+        let off = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-sonnet-4-20250514".into(),
+                tools: vec![lookup.clone()],
+                web_search: false,
+                ..Default::default()
+            },
+            false,
+        );
+        let off_json = serde_json::to_value(&off.tools).unwrap();
+        assert_eq!(off_json.as_array().unwrap().len(), 1);
+        assert_eq!(off_json[0]["name"], "lookup");
+        assert!(off_json[0].get("type").is_none());
+
+        let on = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-sonnet-4-20250514".into(),
+                tools: vec![lookup],
+                web_search: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let on_json = serde_json::to_value(&on.tools).unwrap();
+        assert_eq!(on_json.as_array().unwrap().len(), 2);
+        assert_eq!(on_json[0]["name"], "lookup");
+        assert_eq!(on_json[1]["type"], "web_search_20250305");
+        assert_eq!(on_json[1]["name"], "web_search");
+        // No client-style input_schema on the hosted tool.
+        assert!(on_json[1].get("input_schema").is_none());
+    }
+
+    #[test]
+    fn web_search_off_emits_no_search_tool_when_tools_empty() {
+        let conv = Conversation::new();
+        let body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-sonnet-4-20250514".into(),
+                web_search: false,
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(body.tools.is_empty());
+    }
+
+    /// Anthropic requires server_tool_use + web_search_tool_result (with
+    /// encrypted_content) echoed byte-faithfully on the next turn.
+    #[test]
+    fn multi_turn_resubmits_web_search_server_artifacts() {
+        let mut conv = Conversation::new();
+        conv.push_user("latest news?");
+
+        let server_tool_use = json!({
+            "type": "server_tool_use",
+            "id": "srvtoolu_1",
+            "name": "web_search",
+            "input": { "query": "latest news" },
+        });
+        let search_result = json!({
+            "type": "web_search_tool_result",
+            "tool_use_id": "srvtoolu_1",
+            "content": [{
+                "type": "web_search_result",
+                "url": "https://example.com",
+                "title": "Example",
+                "encrypted_content": "enc-search-blob-xyz",
+                "page_age": "April 30, 2025"
+            }],
+        });
+
+        let resp = parse_response(wire::MessagesResponse {
+            content: vec![
+                server_tool_use.clone(),
+                search_result.clone(),
+                json!({ "type": "text", "text": "Here is the news." }),
+            ],
+            stop_reason: Some("end_turn".into()),
+            usage: wire::WireUsage::default(),
+        })
+        .unwrap();
+
+        // Opaque reasoning path — not client tool_use / tool_result.
+        assert!(matches!(
+            &resp.message.content[0],
+            ContentBlock::Reasoning(_)
+        ));
+        assert!(matches!(
+            &resp.message.content[1],
+            ContentBlock::Reasoning(_)
+        ));
+
+        // Round-trip each block through block_to_wire before multi-turn build.
+        assert_eq!(block_to_wire(&resp.message.content[0]), server_tool_use);
+        assert_eq!(block_to_wire(&resp.message.content[1]), search_result);
+
+        conv.push_response(resp);
+        conv.push_user("tell me more");
+
+        let body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-sonnet-4-20250514".into(),
+                web_search: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert_eq!(body.messages.len(), 3);
+        assert_eq!(body.messages[1].role, "assistant");
+        assert_eq!(body.messages[1].content[0], server_tool_use);
+        assert_eq!(body.messages[1].content[1], search_result);
+        // encrypted_content must survive intact.
+        assert_eq!(
+            body.messages[1].content[1]["content"][0]["encrypted_content"],
+            "enc-search-blob-xyz"
+        );
+        let tools_json = serde_json::to_value(&body.tools).unwrap();
+        assert_eq!(tools_json[0]["type"], "web_search_20250305");
     }
 }

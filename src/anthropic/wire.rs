@@ -56,11 +56,38 @@ pub struct WireMessage {
     pub content: Vec<Value>,
 }
 
+/// Function tools and Anthropic-hosted server tools share the `tools` array.
 #[derive(Debug, Serialize)]
-pub struct WireTool {
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
+#[serde(untagged)]
+pub enum WireTool {
+    Function {
+        name: String,
+        description: String,
+        input_schema: Value,
+    },
+    /// Hosted web search (`web_search_20250305` + name `web_search`).
+    WebSearch {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        name: &'static str,
+    },
+}
+
+impl WireTool {
+    pub fn function(name: String, description: String, input_schema: Value) -> Self {
+        Self::Function {
+            name,
+            description,
+            input_schema,
+        }
+    }
+
+    pub fn web_search() -> Self {
+        Self::WebSearch {
+            kind: "web_search_20250305",
+            name: "web_search",
+        }
+    }
 }
 
 /// Anthropic has two thinking control planes depending on model generation.

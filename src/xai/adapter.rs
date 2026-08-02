@@ -91,20 +91,26 @@ pub(super) fn build_request(
         ThinkingEffort::High => wire::Effort::High,
     };
 
+    let mut tools: Vec<wire::WireTool> = opts
+        .tools
+        .iter()
+        .map(|t| {
+            wire::WireTool::function(
+                t.name.clone(),
+                t.description.clone(),
+                t.input_schema.clone(),
+            )
+        })
+        .collect();
+    if opts.web_search {
+        tools.push(wire::WireTool::web_search());
+    }
+
     wire::ResponsesRequest {
         model: opts.model.clone(),
         input: conversation_to_input(conv),
         instructions: opts.system.clone(),
-        tools: opts
-            .tools
-            .iter()
-            .map(|t| wire::WireTool {
-                kind: "function",
-                name: t.name.clone(),
-                description: t.description.clone(),
-                parameters: t.input_schema.clone(),
-            })
-            .collect(),
+        tools,
         temperature: opts.temperature,
         max_output_tokens: Some(opts.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)),
         reasoning: wire::Reasoning {
@@ -380,5 +386,123 @@ mod tests {
         assert_eq!(body.input[2]["type"], "function_call");
         assert_eq!(body.input[3]["type"], "function_call_output");
         assert_eq!(body.include, vec!["reasoning.encrypted_content"]);
+    }
+
+    /// Hosted web_search must appear as type-only tool, next to function tools.
+    #[test]
+    fn web_search_emits_hosted_tool_alongside_function_tools() {
+        use crate::types::ToolDef;
+
+        let conv = Conversation::new();
+        let lookup = ToolDef {
+            name: "lookup".into(),
+            description: "d".into(),
+            input_schema: json!({"type": "object"}),
+        };
+
+        let off = build_request(
+            &conv,
+            &RequestOptions {
+                model: "grok-4".into(),
+                tools: vec![lookup.clone()],
+                web_search: false,
+                ..Default::default()
+            },
+            false,
+        );
+        let off_json = serde_json::to_value(&off.tools).unwrap();
+        assert_eq!(off_json.as_array().unwrap().len(), 1);
+        assert_eq!(off_json[0]["type"], "function");
+        assert_eq!(off_json[0]["name"], "lookup");
+
+        let on = build_request(
+            &conv,
+            &RequestOptions {
+                model: "grok-4".into(),
+                tools: vec![lookup],
+                web_search: true,
+                ..Default::default()
+            },
+            false,
+        );
+        let on_json = serde_json::to_value(&on.tools).unwrap();
+        assert_eq!(on_json.as_array().unwrap().len(), 2);
+        assert_eq!(on_json[0]["type"], "function");
+        assert_eq!(on_json[1]["type"], "web_search");
+        assert!(on_json[1].get("name").is_none());
+        assert!(on_json[1].get("parameters").is_none());
+    }
+
+    #[test]
+    fn web_search_off_emits_no_search_tool_when_tools_empty() {
+        let conv = Conversation::new();
+        let body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "grok-4".into(),
+                web_search: false,
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(body.tools.is_empty());
+    }
+
+    /// web_search_call items must reappear in the next request input unchanged.
+    #[test]
+    fn multi_turn_resubmits_web_search_call_item() {
+        let mut conv = Conversation::new();
+        conv.push_user("latest news?");
+
+        let search_call = json!({
+            "type": "web_search_call",
+            "id": "ws_xai_1",
+            "status": "completed",
+            "action": {
+                "type": "search",
+                "query": "latest news about AI"
+            }
+        });
+        let message = json!({
+            "type": "message",
+            "id": "msg_x",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{ "type": "output_text", "text": "Here is the news." }],
+        });
+
+        let resp = parse_response(wire::ResponsesResponse {
+            output: vec![search_call.clone(), message],
+            status: "completed".into(),
+            usage: wire::WireUsage::default(),
+            incomplete_details: None,
+        })
+        .unwrap();
+
+        assert_eq!(resp.provider, ProviderKind::Xai);
+        assert!(matches!(
+            &resp.message.content[0],
+            ContentBlock::Reasoning(r) if r.provider == ProviderKind::Xai
+        ));
+        assert_eq!(block_to_input(&resp.message.content[0]), search_call);
+
+        conv.push_response(resp);
+        conv.push_user("more?");
+
+        let body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "grok-4".into(),
+                web_search: true,
+                ..Default::default()
+            },
+            false,
+        );
+
+        assert_eq!(body.input[1], search_call);
+        assert_eq!(body.input[1]["type"], "web_search_call");
+        assert_eq!(body.input[1]["id"], "ws_xai_1");
+        let tools_json = serde_json::to_value(&body.tools).unwrap();
+        assert_eq!(tools_json[0]["type"], "web_search");
     }
 }

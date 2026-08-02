@@ -10,6 +10,11 @@ pub struct RequestOptions {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub thinking: Option<ThinkingEffort>,
+    /// When true, adapters attach that provider's hosted web-search tool
+    /// (Anthropic server tool; OpenAI/xAI Responses `web_search`). Default off.
+    /// No provider-specific search knobs or citation surface.
+    #[serde(default)]
+    pub web_search: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
