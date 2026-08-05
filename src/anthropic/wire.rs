@@ -16,6 +16,8 @@ pub struct MessagesRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<WireTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<WireToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<Thinking>,
@@ -24,6 +26,17 @@ pub struct MessagesRequest {
     pub cache_control: CacheControl,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+}
+
+/// Anthropic `tool_choice` object (`type` + optional name / parallel flag).
+#[derive(Debug, Clone, Serialize)]
+pub struct WireToolChoice {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disable_parallel_tool_use: Option<bool>,
 }
 
 /// Prompt-cache marker; ephemeral matches Anthropic's default caching tier.

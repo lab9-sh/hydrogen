@@ -14,6 +14,6 @@ pub use content::{
     ToolUseBlock,
 };
 pub use conversation::{Conversation, Message, ProviderKind, Role};
-pub use request::{RequestOptions, ThinkingEffort, ToolDef};
+pub use request::{RequestOptions, ThinkingEffort, ToolChoice, ToolDef};
 pub use response::{Response, StopReason, Usage};
 pub use streaming::{Event, EventStream};

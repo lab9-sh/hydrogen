@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use super::{sse, wire, AnthropicConfig, API_VERSION};
 use crate::types::{
     ContentBlock, Conversation, EventStream, Message, OpaquePayload, ProviderKind, ReasoningBlock,
-    RequestOptions, Response, Role, StopReason, TextBlock, ThinkingEffort, ToolOutput,
+    RequestOptions, Response, Role, StopReason, TextBlock, ThinkingEffort, ToolChoice, ToolOutput,
     ToolUseBlock, Usage,
 };
 use crate::Error;
@@ -109,12 +109,42 @@ pub(super) fn build_request(
         messages: conv.messages().iter().map(message_to_wire).collect(),
         system: opts.system.clone(),
         tools,
+        tool_choice: map_tool_choice(&opts.tool_choice, opts.parallel_tool_calls),
         temperature: opts.temperature,
         thinking: Some(thinking),
         output_config,
         cache_control: wire::CacheControl::EPHEMERAL,
         stream: stream.then_some(true),
     }
+}
+
+/// Map portable tool_choice + optional parallel control onto Anthropic's
+/// `tool_choice` object. `Auto` with unset parallel omits the field entirely
+/// (provider default). When `parallel_tool_calls` is set, Anthropic folds it
+/// into `disable_parallel_tool_use` on the tool_choice object.
+pub(super) fn map_tool_choice(
+    choice: &ToolChoice,
+    parallel_tool_calls: Option<bool>,
+) -> Option<wire::WireToolChoice> {
+    let disable_parallel = parallel_tool_calls.map(|p| !p);
+
+    // Omit when Auto + no parallel override — preserves historical wire shape.
+    if matches!(choice, ToolChoice::Auto) && disable_parallel.is_none() {
+        return None;
+    }
+
+    let (kind, name) = match choice {
+        ToolChoice::Auto => ("auto", None),
+        ToolChoice::Required => ("any", None),
+        ToolChoice::Tool(n) => ("tool", Some(n.clone())),
+        ToolChoice::None => ("none", None),
+    };
+
+    Some(wire::WireToolChoice {
+        kind,
+        name,
+        disable_parallel_tool_use: disable_parallel,
+    })
 }
 
 /// Map portable effort onto the thinking API the model actually supports.
@@ -520,6 +550,108 @@ mod tests {
             false,
         );
         assert!(body.tools.is_empty());
+    }
+
+    /// Default Auto + unset parallel omits tool_choice so existing callers
+    /// keep the historical wire shape (provider default = auto).
+    #[test]
+    fn tool_choice_auto_default_omits_field() {
+        let conv = Conversation::new();
+        let body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-sonnet-4-20250514".into(),
+                tools: vec![ToolDef {
+                    name: "play_move".into(),
+                    description: "d".into(),
+                    input_schema: json!({"type": "object"}),
+                }],
+                tool_choice: ToolChoice::Auto,
+                parallel_tool_calls: None,
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(body.tool_choice.is_none());
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn tool_choice_tool_with_parallel_disabled() {
+        let conv = Conversation::new();
+        let body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-sonnet-4-20250514".into(),
+                tools: vec![ToolDef {
+                    name: "play_move".into(),
+                    description: "d".into(),
+                    input_schema: json!({"type": "object"}),
+                }],
+                tool_choice: ToolChoice::Tool("play_move".into()),
+                parallel_tool_calls: Some(false),
+                ..Default::default()
+            },
+            false,
+        );
+        let tc = body.tool_choice.as_ref().expect("tool_choice present");
+        assert_eq!(tc.kind, "tool");
+        assert_eq!(tc.name.as_deref(), Some("play_move"));
+        assert_eq!(tc.disable_parallel_tool_use, Some(true));
+
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["tool_choice"]["type"], "tool");
+        assert_eq!(json["tool_choice"]["name"], "play_move");
+        assert_eq!(json["tool_choice"]["disable_parallel_tool_use"], true);
+    }
+
+    #[test]
+    fn tool_choice_required_maps_to_any() {
+        let conv = Conversation::new();
+        let body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-sonnet-4-20250514".into(),
+                tool_choice: ToolChoice::Required,
+                ..Default::default()
+            },
+            false,
+        );
+        let tc = body.tool_choice.expect("tool_choice present");
+        assert_eq!(tc.kind, "any");
+        assert!(tc.name.is_none());
+        assert!(tc.disable_parallel_tool_use.is_none());
+    }
+
+    #[test]
+    fn tool_choice_none_and_auto_with_parallel_override() {
+        let conv = Conversation::new();
+        let none_body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-sonnet-4-20250514".into(),
+                tool_choice: ToolChoice::None,
+                ..Default::default()
+            },
+            false,
+        );
+        assert_eq!(none_body.tool_choice.as_ref().map(|t| t.kind), Some("none"));
+
+        // Auto + parallel override still emits tool_choice so disable_parallel lands.
+        let auto_parallel = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-sonnet-4-20250514".into(),
+                tool_choice: ToolChoice::Auto,
+                parallel_tool_calls: Some(false),
+                ..Default::default()
+            },
+            false,
+        );
+        let tc = auto_parallel.tool_choice.expect("tool_choice present");
+        assert_eq!(tc.kind, "auto");
+        assert_eq!(tc.disable_parallel_tool_use, Some(true));
     }
 
     /// Anthropic requires server_tool_use + web_search_tool_result (with
