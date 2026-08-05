@@ -23,7 +23,10 @@ pub struct MessagesRequest {
     pub thinking: Option<Thinking>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<OutputConfig>,
-    pub cache_control: CacheControl,
+    /// Whole-prompt cache marker. Omitted when an explicit per-message
+    /// breakpoint is used instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
 }
@@ -130,6 +133,10 @@ pub struct WireUsage {
     pub input_tokens: u32,
     #[serde(default)]
     pub output_tokens: u32,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]

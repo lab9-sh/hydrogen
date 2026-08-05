@@ -28,4 +28,22 @@ pub enum StopReason {
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Prompt-cache tokens written this turn. Anthropic only; 0 elsewhere.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
+    /// Prompt-cache tokens served from cache this turn. Anthropic only; 0
+    /// elsewhere.
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
+}
+
+impl Usage {
+    /// Every prompt token the turn was billed for, cached or not.
+    ///
+    /// With caching enabled `input_tokens` alone counts only the uncached
+    /// remainder — it reads as ~2 on a fully cached prefix — so context-size
+    /// accounting has to use this instead.
+    pub fn total_input_tokens(&self) -> u32 {
+        self.input_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+    }
 }

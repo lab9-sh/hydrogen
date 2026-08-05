@@ -103,17 +103,28 @@ pub(super) fn build_request(
         tools.push(wire::WireTool::web_search());
     }
 
+    // An explicit breakpoint replaces the whole-prompt marker: keeping both
+    // would cache the full prompt too, which is the write we are avoiding.
+    let msgs = conv.messages();
+    let breakpoint = opts
+        .cache_breakpoint_from_end
+        .and_then(|n| msgs.len().checked_sub(n + 1));
+
     wire::MessagesRequest {
         model: opts.model.clone(),
         max_tokens: opts.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        messages: conv.messages().iter().map(message_to_wire).collect(),
+        messages: msgs
+            .iter()
+            .enumerate()
+            .map(|(i, m)| message_to_wire(m, Some(i) == breakpoint))
+            .collect(),
         system: opts.system.clone(),
         tools,
         tool_choice: map_tool_choice(&opts.tool_choice, opts.parallel_tool_calls),
         temperature: opts.temperature,
         thinking: Some(thinking),
         output_config,
-        cache_control: wire::CacheControl::EPHEMERAL,
+        cache_control: breakpoint.is_none().then_some(wire::CacheControl::EPHEMERAL),
         stream: stream.then_some(true),
     }
 }
@@ -182,13 +193,23 @@ fn extended_thinking_budget(effort: ThinkingEffort) -> u32 {
     }
 }
 
-fn message_to_wire(msg: &Message) -> wire::WireMessage {
+/// `cache_breakpoint` marks this message as the end of the cacheable prefix.
+/// Anthropic carries that on a content block, so it lands on the last one.
+fn message_to_wire(msg: &Message, cache_breakpoint: bool) -> wire::WireMessage {
+    let mut content: Vec<Value> = msg.content.iter().map(block_to_wire).collect();
+    if cache_breakpoint {
+        if let Some(last) = content.last_mut() {
+            if let Some(obj) = last.as_object_mut() {
+                obj.insert("cache_control".into(), json!({ "type": "ephemeral" }));
+            }
+        }
+    }
     wire::WireMessage {
         role: match msg.role {
             Role::User => "user",
             Role::Assistant => "assistant",
         },
-        content: msg.content.iter().map(block_to_wire).collect(),
+        content,
     }
 }
 
@@ -237,6 +258,8 @@ pub(super) fn parse_response(wire: wire::MessagesResponse) -> Result<Response, E
         usage: Usage {
             input_tokens: wire.usage.input_tokens,
             output_tokens: wire.usage.output_tokens,
+            cache_creation_input_tokens: wire.usage.cache_creation_input_tokens,
+            cache_read_input_tokens: wire.usage.cache_read_input_tokens,
         },
         provider: ProviderKind::Anthropic,
     })
@@ -436,6 +459,7 @@ mod tests {
             usage: wire::WireUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                ..Default::default()
             },
         })
         .unwrap();
@@ -473,6 +497,74 @@ mod tests {
         assert_eq!(body.messages[2].content.len(), 2);
         assert_eq!(body.messages[2].content[0]["tool_use_id"], "toolu_1");
         assert_eq!(body.messages[2].content[1]["tool_use_id"], "toolu_2");
+    }
+
+    /// Default: whole-prompt marker, no per-message breakpoints.
+    #[test]
+    fn no_breakpoint_keeps_the_whole_prompt_cache_marker() {
+        let mut conv = Conversation::new();
+        conv.push_user("one");
+        let body = build_request(&conv, &opts("claude-opus-5"), false);
+        assert!(body.cache_control.is_some());
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["cache_control"]["type"], "ephemeral");
+        assert!(json["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none());
+    }
+
+    /// A rewriting loop needs the breakpoint on the last *stable* message, not
+    /// at the end of a prompt whose tail is rebuilt every turn.
+    #[test]
+    fn breakpoint_from_end_marks_the_right_message_and_drops_the_global_marker() {
+        let mut conv = Conversation::new();
+        conv.push_user("stub 1");
+        conv.push_response(parse_response(wire::MessagesResponse {
+            content: vec![json!({ "type": "text", "text": "I play D4" })],
+            stop_reason: Some("end_turn".into()),
+            usage: wire::WireUsage::default(),
+        })
+        .unwrap());
+        conv.push_user("FAT board state");
+
+        let body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-opus-5".into(),
+                cache_breakpoint_from_end: Some(1),
+                ..Default::default()
+            },
+            false,
+        );
+
+        // Global marker gone; both would mean caching the volatile tail too.
+        assert!(body.cache_control.is_none());
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json.get("cache_control").is_none());
+
+        // Index 1 (the assistant turn) is marked; the fat tail is not.
+        assert!(json["messages"][0]["content"][0].get("cache_control").is_none());
+        assert_eq!(json["messages"][1]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert!(json["messages"][2]["content"][0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn breakpoint_deeper_than_the_transcript_is_ignored() {
+        let mut conv = Conversation::new();
+        conv.push_user("only message");
+        let body = build_request(
+            &conv,
+            &RequestOptions {
+                model: "claude-opus-5".into(),
+                cache_breakpoint_from_end: Some(5),
+                ..Default::default()
+            },
+            false,
+        );
+        // No valid target, so fall back to the whole-prompt marker.
+        assert!(body.cache_control.is_some());
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(json["messages"][0]["content"][0].get("cache_control").is_none());
     }
 
     #[test]

@@ -76,6 +76,9 @@ impl Assembler {
         Ok(match ev {
             W::MessageStart { message } => {
                 self.usage.input_tokens = message.usage.input_tokens;
+                self.usage.cache_creation_input_tokens =
+                    message.usage.cache_creation_input_tokens;
+                self.usage.cache_read_input_tokens = message.usage.cache_read_input_tokens;
                 vec![]
             }
             W::ContentBlockStart { index, content_block } => {
@@ -262,6 +265,7 @@ mod tests {
                         usage: wire::WireUsage {
                             input_tokens: 12,
                             output_tokens: 0,
+                            ..Default::default()
                         },
                     },
                 },
@@ -312,6 +316,7 @@ mod tests {
                     usage: Some(wire::WireUsage {
                         input_tokens: 0,
                         output_tokens: 9,
+                        ..Default::default()
                     }),
                 },
                 wire::StreamEvent::MessageStop,
@@ -458,6 +463,7 @@ mod tests {
                         usage: wire::WireUsage {
                             input_tokens: 100,
                             output_tokens: 0,
+                            ..Default::default()
                         },
                     },
                 },
@@ -526,6 +532,7 @@ mod tests {
                     usage: Some(wire::WireUsage {
                         input_tokens: 0,
                         output_tokens: 40,
+                        ..Default::default()
                     }),
                 },
                 wire::StreamEvent::MessageStop,

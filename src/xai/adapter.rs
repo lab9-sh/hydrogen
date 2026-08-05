@@ -228,6 +228,7 @@ pub(super) fn parse_response(wire: wire::ResponsesResponse) -> Result<Response, 
     let usage = Usage {
         input_tokens: wire.usage.input_tokens,
         output_tokens: wire.usage.output_tokens,
+        ..Usage::default()
     };
     let content = wire
         .output
