@@ -26,13 +26,20 @@ pub enum StopReason {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    /// Uncached prompt tokens billed this turn.
+    ///
+    /// Anthropic reports this natively. OpenAI/xAI report a total that already
+    /// includes cached tokens; adapters subtract `cached_tokens` so this field
+    /// stays the uncached remainder and [`Self::total_input_tokens`] stays
+    /// additive across providers.
     pub input_tokens: u32,
     pub output_tokens: u32,
-    /// Prompt-cache tokens written this turn. Anthropic only; 0 elsewhere.
+    /// Prompt-cache tokens written this turn. Anthropic only; 0 on backends
+    /// that do not bill cache writes separately.
     #[serde(default)]
     pub cache_creation_input_tokens: u32,
-    /// Prompt-cache tokens served from cache this turn. Anthropic only; 0
-    /// elsewhere.
+    /// Prompt-cache tokens served from cache this turn (Anthropic
+    /// `cache_read_input_tokens`; OpenAI/xAI `input_tokens_details.cached_tokens`).
     #[serde(default)]
     pub cache_read_input_tokens: u32,
 }

@@ -225,11 +225,7 @@ pub(super) fn block_to_input(block: &ContentBlock) -> Value {
 
 pub(super) fn parse_response(wire: wire::ResponsesResponse) -> Result<Response, Error> {
     let stop_reason = map_stop_reason(&wire);
-    let usage = Usage {
-        input_tokens: wire.usage.input_tokens,
-        output_tokens: wire.usage.output_tokens,
-        ..Usage::default()
-    };
+    let usage = map_usage(wire.usage);
     let content = wire
         .output
         .into_iter()
@@ -244,6 +240,22 @@ pub(super) fn parse_response(wire: wire::ResponsesResponse) -> Result<Response, 
         usage,
         provider: ProviderKind::OpenAi,
     })
+}
+
+/// Map Responses usage onto the Anthropic-shaped [`Usage`] fields.
+///
+/// OpenAI bills `input_tokens` as the full prompt (cached subset included) and
+/// reports cache hits in `input_tokens_details.cached_tokens`. Split them so
+/// `input_tokens` is the uncached remainder and `cache_read_input_tokens` is
+/// the hit — then [`Usage::total_input_tokens`] stays additive.
+pub(super) fn map_usage(wire: wire::WireUsage) -> Usage {
+    let cached = wire.input_tokens_details.cached_tokens.min(wire.input_tokens);
+    Usage {
+        input_tokens: wire.input_tokens - cached,
+        output_tokens: wire.output_tokens,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: cached,
+    }
 }
 
 pub(super) fn wire_item_to_agnostic(item: Value) -> Result<ContentBlock, Error> {
@@ -433,6 +445,7 @@ mod tests {
             usage: wire::WireUsage {
                 input_tokens: 3,
                 output_tokens: 7,
+                ..Default::default()
             },
             incomplete_details: None,
         })
@@ -724,5 +737,22 @@ mod tests {
         assert_eq!(body.input[1]["action"]["query"], "latest news about AI");
         let tools_json = serde_json::to_value(&body.tools).unwrap();
         assert_eq!(tools_json[0]["type"], "web_search");
+    }
+
+    /// OpenAI reports full input_tokens with cached as a subset; split so
+    /// totals stay additive and match Anthropic-shaped telemetry.
+    #[test]
+    fn map_usage_splits_cached_tokens_out_of_input() {
+        let usage = map_usage(wire::WireUsage {
+            input_tokens: 1000,
+            output_tokens: 50,
+            input_tokens_details: wire::InputTokensDetails {
+                cached_tokens: 800,
+            },
+        });
+        assert_eq!(usage.input_tokens, 200);
+        assert_eq!(usage.cache_read_input_tokens, 800);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.total_input_tokens(), 1000);
     }
 }

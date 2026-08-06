@@ -95,6 +95,15 @@ pub struct WireUsage {
     pub input_tokens: u32,
     #[serde(default)]
     pub output_tokens: u32,
+    /// Subset of `input_tokens` served from prompt cache (automatic caching).
+    #[serde(default)]
+    pub input_tokens_details: InputTokensDetails,
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+pub struct InputTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]

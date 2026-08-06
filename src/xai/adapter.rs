@@ -225,11 +225,7 @@ pub(super) fn block_to_input(block: &ContentBlock) -> Value {
 
 pub(super) fn parse_response(wire: wire::ResponsesResponse) -> Result<Response, Error> {
     let stop_reason = map_stop_reason(&wire);
-    let usage = Usage {
-        input_tokens: wire.usage.input_tokens,
-        output_tokens: wire.usage.output_tokens,
-        ..Usage::default()
-    };
+    let usage = map_usage(wire.usage);
     let content = wire
         .output
         .into_iter()
@@ -244,6 +240,22 @@ pub(super) fn parse_response(wire: wire::ResponsesResponse) -> Result<Response, 
         usage,
         provider: ProviderKind::Xai,
     })
+}
+
+/// Map Responses usage onto the Anthropic-shaped [`Usage`] fields.
+///
+/// xAI bills `input_tokens` as the full prompt (cached subset included) and
+/// reports cache hits in `input_tokens_details.cached_tokens`. Split them so
+/// `input_tokens` is the uncached remainder and `cache_read_input_tokens` is
+/// the hit — then [`Usage::total_input_tokens`] stays additive.
+pub(super) fn map_usage(wire: wire::WireUsage) -> Usage {
+    let cached = wire.input_tokens_details.cached_tokens.min(wire.input_tokens);
+    Usage {
+        input_tokens: wire.input_tokens - cached,
+        output_tokens: wire.output_tokens,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: cached,
+    }
 }
 
 pub(super) fn wire_item_to_agnostic(item: Value) -> Result<ContentBlock, Error> {
@@ -600,5 +612,62 @@ mod tests {
         assert_eq!(body.input[1]["id"], "ws_xai_1");
         let tools_json = serde_json::to_value(&body.tools).unwrap();
         assert_eq!(tools_json[0]["type"], "web_search");
+    }
+
+    /// xAI reports full input_tokens with cached as a subset; split so totals
+    /// stay additive and match Anthropic-shaped telemetry.
+    #[test]
+    fn map_usage_splits_cached_tokens_out_of_input() {
+        let usage = map_usage(wire::WireUsage {
+            input_tokens: 1192,
+            output_tokens: 174,
+            input_tokens_details: wire::InputTokensDetails {
+                cached_tokens: 256,
+            },
+        });
+        assert_eq!(usage.input_tokens, 936);
+        assert_eq!(usage.cache_read_input_tokens, 256);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.output_tokens, 174);
+        assert_eq!(usage.total_input_tokens(), 1192);
+    }
+
+    #[test]
+    fn map_usage_caps_cached_at_input_total() {
+        let usage = map_usage(wire::WireUsage {
+            input_tokens: 100,
+            output_tokens: 1,
+            input_tokens_details: wire::InputTokensDetails {
+                cached_tokens: 999,
+            },
+        });
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 100);
+        assert_eq!(usage.total_input_tokens(), 100);
+    }
+
+    #[test]
+    fn parse_response_surfaces_cached_tokens() {
+        let resp = parse_response(wire::ResponsesResponse {
+            output: vec![json!({
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{ "type": "output_text", "text": "ok" }],
+            })],
+            status: "completed".into(),
+            usage: wire::WireUsage {
+                input_tokens: 500,
+                output_tokens: 10,
+                input_tokens_details: wire::InputTokensDetails {
+                    cached_tokens: 400,
+                },
+            },
+            incomplete_details: None,
+        })
+        .unwrap();
+        assert_eq!(resp.usage.input_tokens, 100);
+        assert_eq!(resp.usage.cache_read_input_tokens, 400);
+        assert_eq!(resp.usage.total_input_tokens(), 500);
     }
 }

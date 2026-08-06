@@ -233,6 +233,7 @@ mod tests {
             usage: wire::WireUsage {
                 input_tokens: 1,
                 output_tokens: 2,
+                ..Default::default()
             },
             incomplete_details: None,
         };
