@@ -28,17 +28,6 @@ pub struct TextBlock {
     pub(crate) extras: Option<OpaquePayload>,
 }
 
-impl TextBlock {
-    /// Construct a plain text block. `extras` is empty (provider wire echo is
-    /// only set when parsing a response).
-    pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            extras: None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolUseBlock {
     pub id: String,
@@ -64,16 +53,6 @@ impl ToolUseBlock {
 pub struct ToolResultBlock {
     pub id: String,
     pub output: ToolOutput,
-}
-
-impl ToolResultBlock {
-    /// Construct a tool-result block for a caller-built user turn.
-    pub fn new(id: impl Into<String>, output: ToolOutput) -> Self {
-        Self {
-            id: id.into(),
-            output,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -14,11 +14,6 @@ pub struct ResponsesRequest {
     pub instructions: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<WireTool>,
-    /// `"auto"` / `"required"` / `"none"` or `{ "type": "function", "name": … }`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_choice: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use super::{sse, wire, OpenAiConfig};
 use crate::types::{
     ContentBlock, Conversation, EventStream, Message, OpaquePayload, ProviderKind, ReasoningBlock,
-    RequestOptions, Response, Role, StopReason, TextBlock, ThinkingEffort, ToolChoice, ToolOutput,
+    RequestOptions, Response, Role, StopReason, TextBlock, ThinkingEffort, ToolOutput,
     ToolUseBlock, Usage,
 };
 use crate::Error;
@@ -111,8 +111,6 @@ pub(super) fn build_request(
         input: conversation_to_input(conv),
         instructions: opts.system.clone(),
         tools,
-        tool_choice: map_tool_choice(&opts.tool_choice),
-        parallel_tool_calls: opts.parallel_tool_calls,
         temperature: opts.temperature,
         max_output_tokens: Some(opts.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)),
         reasoning: wire::Reasoning {
@@ -125,20 +123,6 @@ pub(super) fn build_request(
         include: vec!["reasoning.encrypted_content"],
         prompt_cache_key: conv.cache_key().to_string(),
         stream: stream.then_some(true),
-    }
-}
-
-/// Map portable tool_choice onto Responses API values. `Auto` omits the field
-/// (provider default). Specific tools use `{ "type": "function", "name": … }`.
-pub(super) fn map_tool_choice(choice: &ToolChoice) -> Option<Value> {
-    match choice {
-        ToolChoice::Auto => None,
-        ToolChoice::Required => Some(json!("required")),
-        ToolChoice::None => Some(json!("none")),
-        ToolChoice::Tool(name) => Some(json!({
-            "type": "function",
-            "name": name,
-        })),
     }
 }
 
@@ -445,7 +429,7 @@ mod tests {
             usage: wire::WireUsage {
                 input_tokens: 3,
                 output_tokens: 7,
-                ..Default::default()
+            ..Default::default()
             },
             incomplete_details: None,
         })
@@ -598,85 +582,6 @@ mod tests {
             false,
         );
         assert!(body.tools.is_empty());
-    }
-
-    /// Default Auto + unset parallel omits both fields (provider defaults).
-    #[test]
-    fn tool_choice_auto_default_omits_fields() {
-        let conv = Conversation::new();
-        let body = build_request(
-            &conv,
-            &RequestOptions {
-                model: "gpt-5".into(),
-                tools: vec![crate::types::ToolDef {
-                    name: "play_move".into(),
-                    description: "d".into(),
-                    input_schema: json!({"type": "object"}),
-                }],
-                tool_choice: ToolChoice::Auto,
-                parallel_tool_calls: None,
-                ..Default::default()
-            },
-            false,
-        );
-        assert!(body.tool_choice.is_none());
-        assert!(body.parallel_tool_calls.is_none());
-        let json = serde_json::to_value(&body).unwrap();
-        assert!(json.get("tool_choice").is_none());
-        assert!(json.get("parallel_tool_calls").is_none());
-    }
-
-    #[test]
-    fn tool_choice_tool_with_parallel_disabled() {
-        let conv = Conversation::new();
-        let body = build_request(
-            &conv,
-            &RequestOptions {
-                model: "gpt-5".into(),
-                tool_choice: ToolChoice::Tool("play_move".into()),
-                parallel_tool_calls: Some(false),
-                ..Default::default()
-            },
-            false,
-        );
-        assert_eq!(
-            body.tool_choice,
-            Some(json!({ "type": "function", "name": "play_move" }))
-        );
-        assert_eq!(body.parallel_tool_calls, Some(false));
-
-        let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json["tool_choice"]["type"], "function");
-        assert_eq!(json["tool_choice"]["name"], "play_move");
-        assert_eq!(json["parallel_tool_calls"], false);
-    }
-
-    #[test]
-    fn tool_choice_required_and_none() {
-        let conv = Conversation::new();
-        let required = build_request(
-            &conv,
-            &RequestOptions {
-                model: "gpt-5".into(),
-                tool_choice: ToolChoice::Required,
-                ..Default::default()
-            },
-            false,
-        );
-        assert_eq!(required.tool_choice, Some(json!("required")));
-
-        let none = build_request(
-            &conv,
-            &RequestOptions {
-                model: "gpt-5".into(),
-                tool_choice: ToolChoice::None,
-                parallel_tool_calls: Some(true),
-                ..Default::default()
-            },
-            false,
-        );
-        assert_eq!(none.tool_choice, Some(json!("none")));
-        assert_eq!(none.parallel_tool_calls, Some(true));
     }
 
     /// web_search_call items must reappear in the next request input unchanged.

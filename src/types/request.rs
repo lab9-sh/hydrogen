@@ -15,41 +15,6 @@ pub struct RequestOptions {
     /// No provider-specific search knobs or citation surface.
     #[serde(default)]
     pub web_search: bool,
-    /// Whether / which tool the model must call. Default [`ToolChoice::Auto`].
-    #[serde(default)]
-    pub tool_choice: ToolChoice,
-    /// `None` leaves the provider default untouched. `Some(false)` disables
-    /// parallel tool calls when the backend supports it.
-    #[serde(default)]
-    pub parallel_tool_calls: Option<bool>,
-    /// Place the prompt-cache breakpoint this many messages from the end,
-    /// instead of implicitly at the end of the whole prompt.
-    ///
-    /// `Some(1)` marks the second-to-last message. That is what a rewriting
-    /// loop needs: if the tail message is rebuilt every turn, an implicit
-    /// end-of-prompt breakpoint caches a prefix that never matches again, so
-    /// every turn is a full cache miss *and* a full cache write. Marking the
-    /// last message that will not change keeps the cached prefix growing
-    /// monotonically.
-    ///
-    /// Anthropic only; ignored by backends that cache automatically.
-    #[serde(default)]
-    pub cache_breakpoint_from_end: Option<usize>,
-}
-
-/// Portable control over whether the model may / must / must-not call tools.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolChoice {
-    /// Model decides (current default behavior).
-    #[default]
-    Auto,
-    /// Must call some tool.
-    Required,
-    /// Must call this specific tool.
-    Tool(String),
-    /// Tools may be visible but not callable.
-    None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

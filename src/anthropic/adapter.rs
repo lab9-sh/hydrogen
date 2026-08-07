@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use super::{sse, wire, AnthropicConfig, API_VERSION};
 use crate::types::{
     ContentBlock, Conversation, EventStream, Message, OpaquePayload, ProviderKind, ReasoningBlock,
-    RequestOptions, Response, Role, StopReason, TextBlock, ThinkingEffort, ToolChoice, ToolOutput,
+    RequestOptions, Response, Role, StopReason, TextBlock, ThinkingEffort, ToolOutput,
     ToolUseBlock, Usage,
 };
 use crate::Error;
@@ -103,59 +103,18 @@ pub(super) fn build_request(
         tools.push(wire::WireTool::web_search());
     }
 
-    // An explicit breakpoint replaces the whole-prompt marker: keeping both
-    // would cache the full prompt too, which is the write we are avoiding.
-    let msgs = conv.messages();
-    let breakpoint = opts
-        .cache_breakpoint_from_end
-        .and_then(|n| msgs.len().checked_sub(n + 1));
-
     wire::MessagesRequest {
         model: opts.model.clone(),
         max_tokens: opts.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        messages: msgs
-            .iter()
-            .enumerate()
-            .map(|(i, m)| message_to_wire(m, Some(i) == breakpoint))
-            .collect(),
+        messages: conv.messages().iter().map(message_to_wire).collect(),
         system: opts.system.clone(),
         tools,
-        tool_choice: map_tool_choice(&opts.tool_choice, opts.parallel_tool_calls),
         temperature: opts.temperature,
         thinking: Some(thinking),
         output_config,
-        cache_control: breakpoint.is_none().then_some(wire::CacheControl::EPHEMERAL),
+        cache_control: wire::CacheControl::EPHEMERAL,
         stream: stream.then_some(true),
     }
-}
-
-/// Map portable tool_choice + optional parallel control onto Anthropic's
-/// `tool_choice` object. `Auto` with unset parallel omits the field entirely
-/// (provider default). When `parallel_tool_calls` is set, Anthropic folds it
-/// into `disable_parallel_tool_use` on the tool_choice object.
-pub(super) fn map_tool_choice(
-    choice: &ToolChoice,
-    parallel_tool_calls: Option<bool>,
-) -> Option<wire::WireToolChoice> {
-    let disable_parallel = parallel_tool_calls.map(|p| !p);
-
-    // Omit when Auto + no parallel override — preserves historical wire shape.
-    if matches!(choice, ToolChoice::Auto) && disable_parallel.is_none() {
-        return None;
-    }
-
-    let (kind, name) = match choice {
-        ToolChoice::Auto => ("auto", None),
-        ToolChoice::Required => ("any", None),
-        ToolChoice::Tool(n) => ("tool", Some(n.clone())),
-        ToolChoice::None => ("none", None),
-    };
-
-    Some(wire::WireToolChoice {
-        kind,
-        name,
-        disable_parallel_tool_use: disable_parallel,
-    })
 }
 
 /// Map portable effort onto the thinking API the model actually supports.
@@ -193,23 +152,13 @@ fn extended_thinking_budget(effort: ThinkingEffort) -> u32 {
     }
 }
 
-/// `cache_breakpoint` marks this message as the end of the cacheable prefix.
-/// Anthropic carries that on a content block, so it lands on the last one.
-fn message_to_wire(msg: &Message, cache_breakpoint: bool) -> wire::WireMessage {
-    let mut content: Vec<Value> = msg.content.iter().map(block_to_wire).collect();
-    if cache_breakpoint {
-        if let Some(last) = content.last_mut() {
-            if let Some(obj) = last.as_object_mut() {
-                obj.insert("cache_control".into(), json!({ "type": "ephemeral" }));
-            }
-        }
-    }
+fn message_to_wire(msg: &Message) -> wire::WireMessage {
     wire::WireMessage {
         role: match msg.role {
             Role::User => "user",
             Role::Assistant => "assistant",
         },
-        content,
+        content: msg.content.iter().map(block_to_wire).collect(),
     }
 }
 
@@ -459,7 +408,7 @@ mod tests {
             usage: wire::WireUsage {
                 input_tokens: 10,
                 output_tokens: 5,
-                ..Default::default()
+            ..Default::default()
             },
         })
         .unwrap();
@@ -497,74 +446,6 @@ mod tests {
         assert_eq!(body.messages[2].content.len(), 2);
         assert_eq!(body.messages[2].content[0]["tool_use_id"], "toolu_1");
         assert_eq!(body.messages[2].content[1]["tool_use_id"], "toolu_2");
-    }
-
-    /// Default: whole-prompt marker, no per-message breakpoints.
-    #[test]
-    fn no_breakpoint_keeps_the_whole_prompt_cache_marker() {
-        let mut conv = Conversation::new();
-        conv.push_user("one");
-        let body = build_request(&conv, &opts("claude-opus-5"), false);
-        assert!(body.cache_control.is_some());
-        let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json["cache_control"]["type"], "ephemeral");
-        assert!(json["messages"][0]["content"][0]
-            .get("cache_control")
-            .is_none());
-    }
-
-    /// A rewriting loop needs the breakpoint on the last *stable* message, not
-    /// at the end of a prompt whose tail is rebuilt every turn.
-    #[test]
-    fn breakpoint_from_end_marks_the_right_message_and_drops_the_global_marker() {
-        let mut conv = Conversation::new();
-        conv.push_user("stub 1");
-        conv.push_response(parse_response(wire::MessagesResponse {
-            content: vec![json!({ "type": "text", "text": "I play D4" })],
-            stop_reason: Some("end_turn".into()),
-            usage: wire::WireUsage::default(),
-        })
-        .unwrap());
-        conv.push_user("FAT board state");
-
-        let body = build_request(
-            &conv,
-            &RequestOptions {
-                model: "claude-opus-5".into(),
-                cache_breakpoint_from_end: Some(1),
-                ..Default::default()
-            },
-            false,
-        );
-
-        // Global marker gone; both would mean caching the volatile tail too.
-        assert!(body.cache_control.is_none());
-        let json = serde_json::to_value(&body).unwrap();
-        assert!(json.get("cache_control").is_none());
-
-        // Index 1 (the assistant turn) is marked; the fat tail is not.
-        assert!(json["messages"][0]["content"][0].get("cache_control").is_none());
-        assert_eq!(json["messages"][1]["content"][0]["cache_control"]["type"], "ephemeral");
-        assert!(json["messages"][2]["content"][0].get("cache_control").is_none());
-    }
-
-    #[test]
-    fn breakpoint_deeper_than_the_transcript_is_ignored() {
-        let mut conv = Conversation::new();
-        conv.push_user("only message");
-        let body = build_request(
-            &conv,
-            &RequestOptions {
-                model: "claude-opus-5".into(),
-                cache_breakpoint_from_end: Some(5),
-                ..Default::default()
-            },
-            false,
-        );
-        // No valid target, so fall back to the whole-prompt marker.
-        assert!(body.cache_control.is_some());
-        let json = serde_json::to_value(&body).unwrap();
-        assert!(json["messages"][0]["content"][0].get("cache_control").is_none());
     }
 
     #[test]
@@ -642,108 +523,6 @@ mod tests {
             false,
         );
         assert!(body.tools.is_empty());
-    }
-
-    /// Default Auto + unset parallel omits tool_choice so existing callers
-    /// keep the historical wire shape (provider default = auto).
-    #[test]
-    fn tool_choice_auto_default_omits_field() {
-        let conv = Conversation::new();
-        let body = build_request(
-            &conv,
-            &RequestOptions {
-                model: "claude-sonnet-4-20250514".into(),
-                tools: vec![ToolDef {
-                    name: "play_move".into(),
-                    description: "d".into(),
-                    input_schema: json!({"type": "object"}),
-                }],
-                tool_choice: ToolChoice::Auto,
-                parallel_tool_calls: None,
-                ..Default::default()
-            },
-            false,
-        );
-        assert!(body.tool_choice.is_none());
-        let json = serde_json::to_value(&body).unwrap();
-        assert!(json.get("tool_choice").is_none());
-    }
-
-    #[test]
-    fn tool_choice_tool_with_parallel_disabled() {
-        let conv = Conversation::new();
-        let body = build_request(
-            &conv,
-            &RequestOptions {
-                model: "claude-sonnet-4-20250514".into(),
-                tools: vec![ToolDef {
-                    name: "play_move".into(),
-                    description: "d".into(),
-                    input_schema: json!({"type": "object"}),
-                }],
-                tool_choice: ToolChoice::Tool("play_move".into()),
-                parallel_tool_calls: Some(false),
-                ..Default::default()
-            },
-            false,
-        );
-        let tc = body.tool_choice.as_ref().expect("tool_choice present");
-        assert_eq!(tc.kind, "tool");
-        assert_eq!(tc.name.as_deref(), Some("play_move"));
-        assert_eq!(tc.disable_parallel_tool_use, Some(true));
-
-        let json = serde_json::to_value(&body).unwrap();
-        assert_eq!(json["tool_choice"]["type"], "tool");
-        assert_eq!(json["tool_choice"]["name"], "play_move");
-        assert_eq!(json["tool_choice"]["disable_parallel_tool_use"], true);
-    }
-
-    #[test]
-    fn tool_choice_required_maps_to_any() {
-        let conv = Conversation::new();
-        let body = build_request(
-            &conv,
-            &RequestOptions {
-                model: "claude-sonnet-4-20250514".into(),
-                tool_choice: ToolChoice::Required,
-                ..Default::default()
-            },
-            false,
-        );
-        let tc = body.tool_choice.expect("tool_choice present");
-        assert_eq!(tc.kind, "any");
-        assert!(tc.name.is_none());
-        assert!(tc.disable_parallel_tool_use.is_none());
-    }
-
-    #[test]
-    fn tool_choice_none_and_auto_with_parallel_override() {
-        let conv = Conversation::new();
-        let none_body = build_request(
-            &conv,
-            &RequestOptions {
-                model: "claude-sonnet-4-20250514".into(),
-                tool_choice: ToolChoice::None,
-                ..Default::default()
-            },
-            false,
-        );
-        assert_eq!(none_body.tool_choice.as_ref().map(|t| t.kind), Some("none"));
-
-        // Auto + parallel override still emits tool_choice so disable_parallel lands.
-        let auto_parallel = build_request(
-            &conv,
-            &RequestOptions {
-                model: "claude-sonnet-4-20250514".into(),
-                tool_choice: ToolChoice::Auto,
-                parallel_tool_calls: Some(false),
-                ..Default::default()
-            },
-            false,
-        );
-        let tc = auto_parallel.tool_choice.expect("tool_choice present");
-        assert_eq!(tc.kind, "auto");
-        assert_eq!(tc.disable_parallel_tool_use, Some(true));
     }
 
     /// Anthropic requires server_tool_use + web_search_tool_result (with

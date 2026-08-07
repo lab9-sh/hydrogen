@@ -66,45 +66,28 @@ impl Conversation {
         Self::default()
     }
 
-    /// Rebuild from a message list and optional provider pin.
-    ///
-    /// Assigns a fresh `cache_key` so restored transcripts do not collide with
-    /// an in-flight conversation's prompt-cache entry.
-    pub fn from_parts(messages: Vec<Message>, provider: Option<ProviderKind>) -> Self {
-        Self {
-            messages,
-            provider,
-            cache_key: new_cache_key(),
-        }
-    }
-
     pub(crate) fn cache_key(&self) -> &str {
         &self.cache_key
-    }
-
-    /// Mutable access to the transcript for in-place rewriting (e.g. demoting
-    /// a fat state block to a thin stub).
-    pub fn messages_mut(&mut self) -> &mut Vec<Message> {
-        &mut self.messages
     }
 
     pub fn push_user(&mut self, text: impl Into<String>) {
         self.messages.push(Message {
             role: Role::User,
-            content: vec![ContentBlock::Text(TextBlock::new(text))],
+            content: vec![ContentBlock::Text(TextBlock {
+                text: text.into(),
+                extras: None,
+            })],
         });
-    }
-
-    /// Append a caller-constructed turn. Does not change the provider pin.
-    pub fn push_message(&mut self, msg: Message) {
-        self.messages.push(msg);
     }
 
     /// Append a tool result. Coalesces into the last user message when it is
     /// already tool-results-only so multi-tool turns match provider layouts
     /// that expect one user turn with several results.
     pub fn push_tool_result(&mut self, id: impl Into<String>, output: ToolOutput) {
-        let block = ContentBlock::ToolResult(ToolResultBlock::new(id, output));
+        let block = ContentBlock::ToolResult(ToolResultBlock {
+            id: id.into(),
+            output,
+        });
         match self.messages.last_mut() {
             Some(m)
                 if m.role == Role::User
@@ -228,90 +211,5 @@ mod tests {
         // Distinct conversations get distinct keys (prompt-cache isolation).
         let other = Conversation::new();
         assert_ne!(conv.cache_key(), other.cache_key());
-    }
-
-    /// Demote the last user message in place (tail-state-block pattern).
-    #[test]
-    fn messages_mut_can_demote_last_user_message() {
-        let mut conv = Conversation::new();
-        conv.push_user("FAT board state with lots of detail");
-        conv.push_response(assistant_response(ProviderKind::Anthropic, "I play D4"));
-
-        // Demote the fat block that was answered.
-        if let Some(last) = conv.messages_mut().first_mut() {
-            *last = Message {
-                role: Role::User,
-                content: vec![ContentBlock::Text(TextBlock::new(
-                    "Move 1 — you played D4. White replied Q16.",
-                ))],
-            };
-        }
-
-        assert_eq!(conv.messages().len(), 2);
-        match &conv.messages()[0].content[0] {
-            ContentBlock::Text(t) => {
-                assert!(t.text.starts_with("Move 1"));
-                assert!(!t.text.contains("FAT board"));
-            }
-            other => panic!("expected text, got {other:?}"),
-        }
-        // Provider pin from push_response must survive demotion.
-        assert_eq!(conv.provider(), Some(ProviderKind::Anthropic));
-    }
-
-    #[test]
-    fn push_message_preserves_provider_pin() {
-        let mut conv = Conversation::new();
-        conv.push_response(assistant_response(ProviderKind::OpenAi, "hi"));
-        assert_eq!(conv.provider(), Some(ProviderKind::OpenAi));
-
-        conv.push_message(Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text(TextBlock::new("next turn"))],
-        });
-
-        assert_eq!(conv.provider(), Some(ProviderKind::OpenAi));
-        assert_eq!(conv.messages().len(), 2);
-        assert_eq!(conv.messages()[1].role, Role::User);
-    }
-
-    #[test]
-    fn from_parts_preserves_messages_and_pin_with_fresh_cache_key() {
-        let mut source = Conversation::new();
-        source.push_user("hello");
-        source.push_response(assistant_response(ProviderKind::Xai, "world"));
-        let source_key = source.cache_key().to_string();
-        let messages = source.messages().to_vec();
-
-        let rebuilt = Conversation::from_parts(messages, Some(ProviderKind::Xai));
-
-        assert_eq!(rebuilt.messages().len(), 2);
-        assert_eq!(rebuilt.provider(), Some(ProviderKind::Xai));
-        assert_ne!(rebuilt.cache_key(), source_key);
-        match &rebuilt.messages()[0].content[0] {
-            ContentBlock::Text(t) => assert_eq!(t.text, "hello"),
-            other => panic!("expected text, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn text_block_and_tool_result_public_constructors() {
-        let text = TextBlock::new("board state");
-        assert_eq!(text.text, "board state");
-        assert!(text.extras.is_none());
-
-        let result = ToolResultBlock::new("call_1", ToolOutput::Text("ok".into()));
-        assert_eq!(result.id, "call_1");
-        assert_eq!(result.output, ToolOutput::Text("ok".into()));
-
-        let mut conv = Conversation::new();
-        conv.push_message(Message {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text(text),
-                ContentBlock::ToolResult(result),
-            ],
-        });
-        assert_eq!(conv.messages()[0].content.len(), 2);
     }
 }

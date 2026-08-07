@@ -18,6 +18,5 @@ pub use openai::OpenAiConfig;
 pub use xai::XaiConfig;
 pub use types::{
     ContentBlock, Conversation, Event, EventStream, Message, ProviderKind, RequestOptions,
-    Response, Role, StopReason, TextBlock, ThinkingEffort, ToolChoice, ToolDef, ToolOutput,
-    ToolResultBlock, ToolUseBlock, Usage,
+    Response, Role, StopReason, ThinkingEffort, ToolDef, ToolOutput, Usage,
 };

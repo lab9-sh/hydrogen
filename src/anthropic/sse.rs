@@ -265,7 +265,7 @@ mod tests {
                         usage: wire::WireUsage {
                             input_tokens: 12,
                             output_tokens: 0,
-                            ..Default::default()
+                        ..Default::default()
                         },
                     },
                 },
@@ -316,7 +316,7 @@ mod tests {
                     usage: Some(wire::WireUsage {
                         input_tokens: 0,
                         output_tokens: 9,
-                        ..Default::default()
+                    ..Default::default()
                     }),
                 },
                 wire::StreamEvent::MessageStop,
@@ -463,7 +463,7 @@ mod tests {
                         usage: wire::WireUsage {
                             input_tokens: 100,
                             output_tokens: 0,
-                            ..Default::default()
+                        ..Default::default()
                         },
                     },
                 },
@@ -532,7 +532,7 @@ mod tests {
                     usage: Some(wire::WireUsage {
                         input_tokens: 0,
                         output_tokens: 40,
-                        ..Default::default()
+                    ..Default::default()
                     }),
                 },
                 wire::StreamEvent::MessageStop,
