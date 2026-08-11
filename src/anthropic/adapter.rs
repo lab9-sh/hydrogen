@@ -103,17 +103,51 @@ pub(super) fn build_request(
         tools.push(wire::WireTool::web_search());
     }
 
+    let mut messages: Vec<wire::WireMessage> =
+        conv.messages().iter().map(message_to_wire).collect();
+
+    // When a volatile fat block is marked, place the cache write on the last
+    // content block of the message immediately before it and omit top-level
+    // cache_control (which would re-anchor the write on the volatile tail).
+    // Pure-append conversations keep always-on top-level caching.
+    let (cache_control, place_block_breakpoint) = match conv.volatile_index() {
+        Some(0) => (None, None), // first-turn edge: no prior stable message
+        Some(i) => (None, Some(i - 1)),
+        None => (Some(wire::CacheControl::EPHEMERAL), None),
+    };
+    if let Some(stable_idx) = place_block_breakpoint {
+        attach_cache_control_to_last_block(&mut messages, stable_idx);
+    }
+
     wire::MessagesRequest {
         model: opts.model.clone(),
         max_tokens: opts.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-        messages: conv.messages().iter().map(message_to_wire).collect(),
+        messages,
         system: opts.system.clone(),
         tools,
         temperature: opts.temperature,
         thinking: Some(thinking),
         output_config,
-        cache_control: wire::CacheControl::EPHEMERAL,
+        cache_control,
         stream: stream.then_some(true),
+    }
+}
+
+/// Attach Anthropic block-level `cache_control: ephemeral` to the last content
+/// object of `messages[msg_idx]`. Adapter-local only — portable ContentBlock
+/// types stay free of provider cache fields.
+fn attach_cache_control_to_last_block(messages: &mut [wire::WireMessage], msg_idx: usize) {
+    let Some(msg) = messages.get_mut(msg_idx) else {
+        return;
+    };
+    let Some(last) = msg.content.last_mut() else {
+        return;
+    };
+    if let Some(obj) = last.as_object_mut() {
+        obj.insert(
+            "cache_control".into(),
+            json!({ "type": "ephemeral" }),
+        );
     }
 }
 
@@ -463,6 +497,75 @@ mod tests {
             Error::InvalidRequest(m) => assert_eq!(m, "bad schema"),
             other => panic!("expected InvalidRequest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn no_volatile_uses_top_level_cache_control_without_block_markers() {
+        let mut conv = Conversation::new();
+        conv.push_user("hello");
+        let body = build_request(&conv, &opts("claude-sonnet-4-20250514"), false);
+        assert!(matches!(
+            body.cache_control,
+            Some(wire::CacheControl { kind: "ephemeral" })
+        ));
+        for msg in &body.messages {
+            for block in &msg.content {
+                assert!(
+                    block.get("cache_control").is_none(),
+                    "block-level cache_control must be absent without volatile: {block}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn volatile_at_tail_places_breakpoint_on_previous_message_last_block() {
+        let mut conv = Conversation::new();
+        conv.push_user("stable prefix");
+        conv.push_response(Response {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text(TextBlock {
+                    text: "ack".into(),
+                    extras: None,
+                })],
+            },
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+            provider: ProviderKind::Anthropic,
+        });
+        conv.push_volatile_user("FAT board state").unwrap();
+        assert_eq!(conv.volatile_index(), Some(2));
+
+        let body = build_request(&conv, &opts("claude-sonnet-4-20250514"), false);
+        assert!(
+            body.cache_control.is_none(),
+            "top-level cache_control must be omitted when volatile is set"
+        );
+        // Breakpoint on message 1 (assistant), last block — not on the volatile user.
+        assert_eq!(
+            body.messages[1].content.last().unwrap()["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert!(body.messages[0].content[0].get("cache_control").is_none());
+        assert!(
+            body.messages[2].content[0].get("cache_control").is_none(),
+            "marker must never attach to the volatile message itself"
+        );
+    }
+
+    #[test]
+    fn volatile_at_zero_is_safe_no_block_breakpoint() {
+        let mut conv = Conversation::new();
+        conv.push_volatile_user("FAT first turn").unwrap();
+        assert_eq!(conv.volatile_index(), Some(0));
+
+        let body = build_request(&conv, &opts("claude-sonnet-4-20250514"), false);
+        assert!(body.cache_control.is_none());
+        assert!(
+            body.messages[0].content[0].get("cache_control").is_none(),
+            "no prior stable message to mark"
+        );
     }
 
     /// Hosted web search must serialize as Anthropic's server tool, not a

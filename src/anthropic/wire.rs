@@ -21,7 +21,10 @@ pub struct MessagesRequest {
     pub thinking: Option<Thinking>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_config: Option<OutputConfig>,
-    pub cache_control: CacheControl,
+    /// Top-level automatic cache marker. Omitted when a block-level breakpoint
+    /// is placed from the conversation's volatile mark (demotion path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
 }

@@ -66,6 +66,7 @@ while let Some(event) = stream.next().await {
 - **Shared types** — `Conversation`, `Message`, `ContentBlock`, tools, thinking effort, and usage are provider-agnostic.
 - **Provider pinning** — after the first successful response, a conversation is pinned to that provider; mixing clients returns `Error::ProviderMismatch`.
 - **Optional HTTP client** — pass a custom `reqwest::Client` via each `*Config` if you need proxies, timeouts, or shared pools.
+- **Volatile fat blocks (opt-in)** — environment loops can mark one user message with `push_volatile_user` / `rotate_volatile_user` and demote it later with `demote_volatile`. Append-only chat callers never set the mark. On Anthropic, when a mark is set, hydrogen places a block-level cache breakpoint on the last content block of the message *before* the volatile and omits top-level `cache_control`; pure-append conversations keep always-on top-level caching. OpenAI/xAI keep `prompt_cache_key` only. See [PROPOSAL-volatile-fat-blocks.md](PROPOSAL-volatile-fat-blocks.md).
 
 ## License
 

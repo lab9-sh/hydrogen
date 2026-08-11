@@ -28,6 +28,15 @@ pub struct TextBlock {
     pub(crate) extras: Option<OpaquePayload>,
 }
 
+impl TextBlock {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            extras: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolUseBlock {
     pub id: String,
