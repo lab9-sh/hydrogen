@@ -6,7 +6,7 @@ Unified multi-provider LLM client for Rust. One conversation model and request A
 
 ```toml
 [dependencies]
-hydrogen = { git = "https://github.com/lab9-sh/hydrogen" }
+hydrogen = { git = "https://github.com/lab9-sh/hydrogen", tag = "v0.1.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
